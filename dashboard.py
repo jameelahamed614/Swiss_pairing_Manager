@@ -324,7 +324,6 @@ if not st.session_state.active_t_name:
 
 t = st.session_state.tournaments[st.session_state.active_t_name]
 
-# --- STANDINGS RENDERER WITH STYLING ---
 def draw_standings(t_obj):
     sorted_players = get_sorted_players(t_obj)
     if not sorted_players:
@@ -336,6 +335,7 @@ def draw_standings(t_obj):
     current_rank = 1
     
     for i, p in enumerate(sorted_players):
+        # Build comparison key (excludes Rating so players with different ratings tie)
         key = [p.score]
         for tb in t_obj.tiebreaks:
             if tb == "Buchholz Cut 1": key.append(p.tb_buchholz_cut)
@@ -344,6 +344,7 @@ def draw_standings(t_obj):
             elif tb == "Direct Encounter (Head-to-Head)": key.append(p.tb_h2h)
             elif tb == "Greater Number of Wins": key.append(p.tb_wins)
             
+        # Update Rank offset if the key is different from the previous player
         if key != prev_key:
             current_rank = i + 1
             prev_key = key
@@ -359,15 +360,7 @@ def draw_standings(t_obj):
         row["Status"] = "Active" if p.is_active else "Withdrawn"
         df_data.append(row)
         
-    df = pd.DataFrame(df_data)
-    
-    # Apply Pandas Styler to center-align all columns, and left-align just 'Name'
-    styled_df = df.style.set_properties(**{'text-align': 'center'}) \
-                        .set_properties(subset=['Name'], **{'text-align': 'left'}) \
-                        .set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
-                        
-    st.dataframe(styled_df, hide_index=True, use_container_width=True)
-
+    st.dataframe(pd.DataFrame(df_data), hide_index=True, use_container_width=True)
 
 st.title(f"♟️ {t.name}")
 
