@@ -290,7 +290,6 @@ with st.sidebar:
     raw_tbs = [tb1, tb2, tb3, tb4]
     sel_tbs = [tb for tb in raw_tbs if tb != "None" and tb not in locals().get('sel_tbs', [])]
     
-    # Quick dedup hack for simple list:
     final_tbs = []
     for x in sel_tbs:
         if x not in final_tbs: final_tbs.append(x)
@@ -353,7 +352,6 @@ st.title(f"♟️ {t.name}")
 # PUBLIC VIEW (Auto-Refreshing)
 # ==========================================
 if not st.session_state.is_arbiter:
-    # LIVE AUTO-REFRESH INJECTION
     components.html(
         "<script>setTimeout(function(){window.parent.location.reload();}, 30000);</script>",
         height=0, width=0
@@ -489,7 +487,6 @@ with tab2:
                             sync_to_cloud(t)
                         st.rerun()
             
-            # --- MANUAL OVERRIDES SECTION ---
             with st.expander("🛠️ Manual Pairings & Color Overrides"):
                 st.write("Use this tool to swap colors or change matchups completely before submitting results.")
                 with st.form("override_form"):
@@ -550,17 +547,29 @@ with tab3:
     for r in rounds:
         with st.expander(f"Round {r}"):
             r_matches = [m for m in t.match_history if m['round'] == r]
-            for match in r_matches:
-                w_p = t.players[match['white_id']]
-                if match['board'] == 'BYE': st.write(f"**BYE:** {w_p.name}")
-                else:
-                    b_p = t.players[match['black_id']]
-                    new_res = st.selectbox(f"Board {match['board']}: ⚪ {w_p.name} vs ⚫ {b_p.name}", ["Pending", "1-0", "0-1", "0.5-0.5"], index=["Pending", "1-0", "0-1", "0.5-0.5"].index(match['result']), key=f"all_edit_R{r}_B{match['board']}")
-                    if new_res != match['result']:
-                        match['result'] = new_res
-                        sync_to_cloud(t)
-                        st.toast("Match updated!")
-                        st.rerun()
+            
+            # --- THE FIX: Block the active round from clashing with memory ---
+            if r == t.current_round and not t.is_finished:
+                st.info("ℹ️ This round is currently active. Please submit results in the **Round Manager** tab.")
+                for match in r_matches:
+                    w_p = t.players[match['white_id']]
+                    if match['board'] == 'BYE': 
+                        st.write(f"**BYE:** {w_p.name}")
+                    else:
+                        b_p = t.players[match['black_id']]
+                        st.write(f"Board {match['board']}: ⚪ {w_p.name} vs ⚫ {b_p.name} **[{match['result']}]**")
+            else:
+                for match in r_matches:
+                    w_p = t.players[match['white_id']]
+                    if match['board'] == 'BYE': st.write(f"**BYE:** {w_p.name}")
+                    else:
+                        b_p = t.players[match['black_id']]
+                        new_res = st.selectbox(f"Board {match['board']}: ⚪ {w_p.name} vs ⚫ {b_p.name}", ["Pending", "1-0", "0-1", "0.5-0.5"], index=["Pending", "1-0", "0-1", "0.5-0.5"].index(match['result']), key=f"all_edit_R{r}_B{match['board']}")
+                        if new_res != match['result']:
+                            match['result'] = new_res
+                            sync_to_cloud(t)
+                            st.toast("Match updated!")
+                            st.rerun()
 
     st.divider()
     st.header("⚙️ Tournament Settings")
