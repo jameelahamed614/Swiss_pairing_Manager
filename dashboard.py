@@ -206,13 +206,51 @@ def generate_graph_pairings(t: Tournament):
     active_players = [p for p in t.players.values() if p.is_active]
     G = nx.Graph()
     for p in active_players: G.add_node(p.id)
+    
     DUMMY_BYE_ID = -999
     if len(active_players) % 2 != 0:
         G.add_node(DUMMY_BYE_ID)
         for p in active_players:
             if not p.has_had_bye:
-                bye_weight = 10000000 - (p.score * 100000) - p.rating
+                # Base weight for a bye
+                bye_weight = 100000000 - (p.score * 100000) - p.rating
                 G.add_edge(p.id, DUMMY_BYE_ID, weight=bye_weight)
+
+    # Create edges between EVERY player, but heavily penalize duplicates
+    for i in range(len(active_players)):
+        for j in range(i + 1, len(active_players)):
+            p1, p2 = active_players[i], active_players[j]
+            
+            # Base weight for a standard valid match
+            weight = 10000000 - (abs(p1.score - p2.score) * 100000) - abs(p1.rating - p2.rating)
+            
+            # --- THE FALLBACK FIX ---
+            # If they have played before, apply a massive penalty.
+            # The algorithm will ONLY choose this if dropping players is the only other option.
+            if p2.id in p1.opponents:
+                weight -= 500000000  
+                
+            # Color balancing penalties
+            p1_pref, p1_abs = p1.color_preference()
+            p2_pref, p2_abs = p2.color_preference()
+            if p1_abs and p2_abs and p1_pref == p2_pref: weight -= 50000
+            elif p1_pref == p2_pref and p1_pref is not None: weight -= 10000
+            
+            G.add_edge(p1.id, p2.id, weight=weight)
+
+    # maxcardinality=True ensures everyone gets paired
+    matching = nx.max_weight_matching(G, maxcardinality=True)
+    
+    board = 1
+    for u, v in matching:
+        if u == DUMMY_BYE_ID or v == DUMMY_BYE_ID:
+            bye_id = u if v == DUMMY_BYE_ID else v
+            t.match_history.append({'round': t.current_round, 'board': 'BYE', 'white_id': bye_id, 'black_id': None, 'result': 'BYE'})
+        else:
+            p1, p2 = t.players[u], t.players[v]
+            white, black = assign_colors(p1, p2)
+            t.match_history.append({'round': t.current_round, 'board': board, 'white_id': white.id, 'black_id': black.id, 'result': 'Pending'})
+            board += 1
 
     for i in range(len(active_players)):
         for j in range(i + 1, len(active_players)):
