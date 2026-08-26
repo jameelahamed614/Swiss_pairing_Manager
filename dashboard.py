@@ -13,42 +13,48 @@ def init_supabase() -> Client:
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
     except Exception as e:
-        st.error("⚠️ Database connection failed. Ensure SUPABASE_URL and SUPABASE_KEY are in Streamlit Secrets.")
+        st.error("⚠️ Database connection failed. Check your Streamlit Secrets.")
         st.stop()
 
 supabase = init_supabase()
 
 def load_data_from_cloud():
-    """Fetches all data from Supabase and rebuilds the Tournament states."""
+    """Fetches all data from Supabase and rebuilds the memory states."""
     tournaments = {}
     
-    # 1. Load Players
+    # 1. Load Tournaments
+    res_t = supabase.table("tournaments").select("*").execute()
+    for row in res_t.data:
+        t = Tournament(row['name'])
+        t.tiebreaks = row['tiebreaks'].split(',') if row['tiebreaks'] else []
+        t.is_finished = row['is_finished']
+        tournaments[t.name] = t
+
+    # 2. Load Players
     res_p = supabase.table("players").select("*").execute()
     for row in res_p.data:
         t_name = row['tournament']
-        if t_name not in tournaments: tournaments[t_name] = Tournament(t_name)
-        
-        p = Player(row['id'], row['name'], row['rating'])
-        p.is_active = bool(row['is_active'])
-        tournaments[t_name].players[p.id] = p
-        if p.id >= tournaments[t_name].next_player_id:
-            tournaments[t_name].next_player_id = p.id + 1
+        if t_name in tournaments:
+            p = Player(row['id'], row['name'], row['rating'])
+            p.is_active = bool(row['is_active'])
+            tournaments[t_name].players[p.id] = p
+            if p.id >= tournaments[t_name].next_player_id:
+                tournaments[t_name].next_player_id = p.id + 1
 
-    # 2. Load Matches
+    # 3. Load Matches
     res_m = supabase.table("matches").select("*").execute()
     for row in res_m.data:
         t_name = row['tournament']
-        if t_name not in tournaments: tournaments[t_name] = Tournament(t_name)
-        
-        tournaments[t_name].match_history.append({
-            'round': row['round'],
-            'board': 'BYE' if row['board'] == 'BYE' else int(row['board']),
-            'white_id': row['white_id'],
-            'black_id': None if row['black_id'] is None else int(row['black_id']),
-            'result': row['result']
-        })
-        if row['round'] >= tournaments[t_name].current_round:
-            tournaments[t_name].current_round = row['round']
+        if t_name in tournaments:
+            tournaments[t_name].match_history.append({
+                'round': row['round'],
+                'board': 'BYE' if row['board'] == 'BYE' else int(row['board']),
+                'white_id': row['white_id'],
+                'black_id': None if row['black_id'] is None else int(row['black_id']),
+                'result': row['result']
+            })
+            if row['round'] >= tournaments[t_name].current_round:
+                tournaments[t_name].current_round = row['round']
             
     # Forward the round if previous round is fully resulted
     for t in tournaments.values():
@@ -61,11 +67,20 @@ def load_data_from_cloud():
 
 def sync_to_cloud(t):
     """Upserts the current tournament data directly to Supabase."""
+    # Sync Tournament Settings
+    tb_str = ",".join(t.tiebreaks)
+    supabase.table("tournaments").upsert({"name": t.name, "tiebreaks": tb_str, "is_finished": t.is_finished}).execute()
+    
     p_data = [{"tournament": t.name, "id": p.id, "name": p.name, "rating": p.rating, "is_active": p.is_active} for p in t.players.values()]
     m_data = [{"tournament": t.name, "round": m['round'], "board": str(m['board']), "white_id": m['white_id'], "black_id": m['black_id'], "result": m['result']} for m in t.match_history]
     
     if p_data: supabase.table("players").upsert(p_data).execute()
     if m_data: supabase.table("matches").upsert(m_data).execute()
+
+def delete_tournament_from_cloud(t_name):
+    supabase.table("matches").delete().eq("tournament", t_name).execute()
+    supabase.table("players").delete().eq("tournament", t_name).execute()
+    supabase.table("tournaments").delete().eq("name", t_name).execute()
 
 # ==========================================
 # 2. DATA MODELS & FIDE LOGIC
@@ -80,7 +95,7 @@ class Player:
         self.color_history = []
         self.has_had_bye = False
         self.is_active = True  
-        self.tb_mwb = self.tb_h2h = self.tb_buchholz = self.tb_buchholz_cut = 0
+        self.tb_mwb = self.tb_h2h = self.tb_buchholz = self.tb_buchholz_cut = self.tb_wins = 0
 
     def color_preference(self):
         if len(self.color_history) >= 2:
@@ -100,7 +115,8 @@ class Tournament:
         self.next_player_id = 1
         self.current_round = 1
         self.match_history = []
-        self.tiebreaks = ["TB3: Buchholz", "TB4: Buchholz Cut-1", "TB2: Head-to-Head", "TB1: Most Wins by Black"]
+        self.tiebreaks = []
+        self.is_finished = False
 
 def assign_colors(p1: Player, p2: Player):
     pref1, abs1 = p1.color_preference()
@@ -115,7 +131,7 @@ def assign_colors(p1: Player, p2: Player):
 
 def recalculate_standings(t: Tournament):
     for p in t.players.values():
-        p.score = p.tb_mwb = p.tb_h2h = p.tb_buchholz = p.tb_buchholz_cut = 0
+        p.score = p.tb_mwb = p.tb_h2h = p.tb_buchholz = p.tb_buchholz_cut = p.tb_wins = 0
         p.opponents = set()
         p.color_history = []
         p.has_had_bye = False
@@ -126,20 +142,25 @@ def recalculate_standings(t: Tournament):
         if match['board'] == 'BYE':
             w_player.has_had_bye = True
             w_player.score += 1.0
+            w_player.tb_wins += 1 
         else:
             b_player = t.players[match['black_id']]
             w_player.opponents.add(b_player.id)
             b_player.opponents.add(w_player.id)
             w_player.color_history.append('W')
             b_player.color_history.append('B')
-            if match['result'] == '1-0': w_player.score += 1.0
+            if match['result'] == '1-0': 
+                w_player.score += 1.0
+                w_player.tb_wins += 1
             elif match['result'] == '0-1': 
                 b_player.score += 1.0
-                b_player.tb_mwb += 1
+                b_player.tb_wins += 1
+                b_player.tb_mwb += 1 # Wins with Black
             elif match['result'] == '0.5-0.5':
                 w_player.score += 0.5
                 b_player.score += 0.5
 
+    # Buchholz Math
     score_groups = {}
     for p in t.players.values():
         score_groups.setdefault(p.score, []).append(p)
@@ -148,6 +169,7 @@ def recalculate_standings(t: Tournament):
             p.tb_buchholz = sum(opp_scores)
             p.tb_buchholz_cut = p.tb_buchholz - min(opp_scores) if len(opp_scores) > 1 else p.tb_buchholz
 
+    # H2H Math
     for score, group in score_groups.items():
         if len(group) > 1:
             group_ids = {p.id for p in group}
@@ -170,10 +192,11 @@ def get_sorted_players(t: Tournament):
     def sort_key(p):
         key = [p.score]
         for tb in t.tiebreaks:
-            if "TB1" in tb: key.append(p.tb_mwb)
-            elif "TB2" in tb: key.append(p.tb_h2h)
-            elif "TB3" in tb: key.append(p.tb_buchholz)
-            elif "TB4" in tb: key.append(p.tb_buchholz_cut)
+            if tb == "Buchholz Cut 1": key.append(p.tb_buchholz_cut)
+            elif tb == "Buchholz Total": key.append(p.tb_buchholz)
+            elif tb == "Greater Number of Wins with Black": key.append(p.tb_mwb)
+            elif tb == "Direct Encounter (Head-to-Head)": key.append(p.tb_h2h)
+            elif tb == "Greater Number of Wins": key.append(p.tb_wins)
         key.append(p.rating)
         return tuple(key)
     players_list.sort(key=sort_key, reverse=True)
@@ -214,66 +237,120 @@ def generate_graph_pairings(t: Tournament):
             t.match_history.append({'round': t.current_round, 'board': board, 'white_id': white.id, 'black_id': black.id, 'result': 'Pending'})
             board += 1
 
+
 # ==========================================
-# 3. STREAMLIT UI (ARBITER vs PUBLIC)
+# 3. STREAMLIT UI
 # ==========================================
-st.set_page_config(page_title="Swiss Pairing Supabase Manager", layout="wide")
+st.set_page_config(page_title="Swiss Pairing Manager", layout="wide")
+
+st.session_state.setdefault("is_arbiter", False)
 
 # Fetch data on first load
 if "tournaments" not in st.session_state:
     with st.spinner("Fetching live data from Supabase..."):
         st.session_state.tournaments = load_data_from_cloud()
-        if not st.session_state.tournaments:
-            st.session_state.tournaments = {"Main Tournament": Tournament("Main Tournament")}
-        st.session_state.active_t_name = list(st.session_state.tournaments.keys())[0]
+        
+if "active_t_name" not in st.session_state:
+    t_list = list(st.session_state.tournaments.keys())
+    st.session_state.active_t_name = t_list[0] if t_list else None
 
-# --- SIDEBAR & AUTHENTICATION ---
+# --- SIDEBAR ---
 with st.sidebar:
+    # 1. Create Tournament (Moved Above Login)
+    st.header("➕ Create Tournament")
+    new_t_name = st.text_input("Tournament Name")
+    
+    default_tb_opts = [
+        "Buchholz Cut 1", 
+        "Buchholz Total", 
+        "Greater Number of Wins with Black", 
+        "Direct Encounter (Head-to-Head)", 
+        "Greater Number of Wins"
+    ]
+    sel_tbs = st.multiselect("Select Tiebreak Order (Drag to reorder)", default_tb_opts, default=default_tb_opts)
+    
+    if st.button("Create Tournament", use_container_width=True) and new_t_name:
+        if new_t_name not in st.session_state.tournaments:
+            new_t = Tournament(new_t_name)
+            new_t.tiebreaks = sel_tbs
+            st.session_state.tournaments[new_t_name] = new_t
+            sync_to_cloud(new_t)
+            st.session_state.active_t_name = new_t_name
+            st.rerun()
+        else:
+            st.error("Name already exists.")
+            
+    st.divider()
+
+    # 2. Arbiter Login (Hides input when logged in)
+    st.header("🔐 Arbiter System")
+    if not st.session_state.is_arbiter:
+        arbiter_pin = st.text_input("Enter PIN to manage tournaments", type="password")
+        if arbiter_pin == "admin123":
+            st.session_state.is_arbiter = True
+            st.rerun()
+    else:
+        st.success("✅ Arbiter Logged In")
+        if st.button("Logout", use_container_width=True):
+            st.session_state.is_arbiter = False
+            st.rerun()
+
+    st.divider()
+
+    # 3. Tournament Selector
     st.header("🏆 Live Tournaments")
-    if st.button("🔄 Refresh Live Data"):
+    if st.button("🔄 Refresh Data"):
         st.session_state.tournaments = load_data_from_cloud()
         st.rerun()
 
     t_names = list(st.session_state.tournaments.keys())
-    selected_t = st.selectbox("Select Tournament", t_names, index=t_names.index(st.session_state.active_t_name))
-    st.session_state.active_t_name = selected_t
-    
-    st.divider()
-    st.header("🔐 Arbiter Login")
-    arbiter_pin = st.text_input("Enter PIN to unlock manager", type="password")
-    is_arbiter = (arbiter_pin == "admin123")
-    
-    if is_arbiter:
-        st.success("Arbiter Unlocked")
-        new_t_name = st.text_input("New Tournament Name")
-        if st.button("Create Tournament", use_container_width=True) and new_t_name:
-            if new_t_name not in st.session_state.tournaments:
-                new_t = Tournament(new_t_name)
-                st.session_state.tournaments[new_t_name] = new_t
-                sync_to_cloud(new_t)
-                st.session_state.active_t_name = new_t_name
-                st.rerun()
-            else:
-                st.error("Name already exists.")
+    if t_names:
+        idx = t_names.index(st.session_state.active_t_name) if st.session_state.active_t_name in t_names else 0
+        selected_t = st.selectbox("Select Tournament", t_names, index=idx)
+        st.session_state.active_t_name = selected_t
+    else:
+        st.info("No tournaments available. Please create one.")
+        st.stop()
 
+# Get Active Tournament
 t = st.session_state.tournaments[st.session_state.active_t_name]
+
+# Helper function to generate dynamic standings table
+def draw_standings(t_obj):
+    sorted_players = get_sorted_players(t_obj)
+    if not sorted_players:
+        st.write("No players registered yet.")
+        return
+        
+    df_data = []
+    for i, p in enumerate(sorted_players):
+        row = {"Rank": i+1, "Name": p.name, "Score": p.score}
+        # Add tiebreaks dynamically based on selection order
+        for tb in t_obj.tiebreaks:
+            if tb == "Buchholz Cut 1": row["BC1"] = p.tb_buchholz_cut
+            elif tb == "Buchholz Total": row["BT"] = p.tb_buchholz
+            elif tb == "Greater Number of Wins with Black": row["MWB"] = p.tb_mwb
+            elif tb == "Direct Encounter (Head-to-Head)": row["H2H"] = p.tb_h2h
+            elif tb == "Greater Number of Wins": row["Wins"] = p.tb_wins
+            
+        row["Status"] = "Active" if p.is_active else "Withdrawn"
+        df_data.append(row)
+        
+    st.dataframe(pd.DataFrame(df_data), hide_index=True, use_container_width=True)
+
 st.title(f"♟️ {t.name}")
 
 # ==========================================
 # PUBLIC VIEW
 # ==========================================
-if not is_arbiter:
-    st.info("ℹ️ **Public View:** Showing live standings and pairings. (Refresh page to update)")
+if not st.session_state.is_arbiter:
+    if t.is_finished:
+        st.success("🏁 **Tournament Completed**")
+    else:
+        st.info("ℹ️ **Public View:** Showing live standings and pairings.")
+        
     tab1, tab2 = st.tabs(["📊 Live Standings", "⚔️ Matches"])
-    
-    with tab1:
-        sorted_players = get_sorted_players(t)
-        if sorted_players:
-            df = pd.DataFrame([{"Rank": i+1, "Name": p.name, "Rating": p.rating, "Score": p.score, "TB1": p.tb_mwb, "TB2": p.tb_h2h, "TB3": p.tb_buchholz, "TB4": p.tb_buchholz_cut} for i, p in enumerate(sorted_players)])
-            st.dataframe(df, hide_index=True, use_container_width=True)
-        else:
-            st.write("No players registered yet.")
-            
+    with tab1: draw_standings(t)
     with tab2:
         rounds = sorted(list(set([m['round'] for m in t.match_history])), reverse=True)
         for r in rounds:
@@ -290,95 +367,120 @@ if not is_arbiter:
 # ==========================================
 # ARBITER VIEW
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["📊 Registration & Standings", "⚔️ Round Manager", "⏪ Edit All Results"])
+tab1, tab2, tab3 = st.tabs(["📊 Registration & Standings", "⚔️ Round Manager", "⏪ Settings & Edits"])
 
 with tab1:
     col1, col2 = st.columns([1, 2])
     with col1:
-        with st.form("add_player", clear_on_submit=True):
-            name = st.text_input("Player Name")
-            rating = st.number_input("Elo Rating", min_value=100, max_value=3500, value=1500)
-            if st.form_submit_button("Add Player") and name:
-                pid = t.next_player_id
-                t.players[pid] = Player(pid, name, rating)
-                t.next_player_id += 1
-                sync_to_cloud(t)
-                st.rerun()
-                
-        st.divider()
-        player_opts = {f"{p.name} ({p.rating}) - {'Active' if p.is_active else 'Withdrawn'}": p for p in t.players.values()}
-        sel_p_name = st.selectbox("Select Player to Edit/Withdraw", ["-- Select --"] + list(player_opts.keys()))
-        if sel_p_name != "-- Select --":
-            sel_p = player_opts[sel_p_name]
-            new_name = st.text_input("Edit Name", value=sel_p.name)
-            new_rating = st.number_input("Edit Rating", value=sel_p.rating)
-            c_ed, c_del = st.columns(2)
-            
-            if c_ed.button("Update Profile"):
-                sel_p.name, sel_p.rating = new_name, new_rating
-                sync_to_cloud(t)
-                st.rerun()
-                
-            if t.current_round == 1:
-                if c_del.button("❌ Hard Delete", type="primary"):
-                    # Delete explicitly from Supabase so it stops showing up in cloud sync
-                    supabase.table("players").delete().eq("tournament", t.name).eq("id", sel_p.id).execute()
-                    del t.players[sel_p.id]
+        if not t.is_finished:
+            with st.form("add_player", clear_on_submit=True):
+                name = st.text_input("Player Name")
+                rating = st.number_input("Elo Rating", min_value=100, max_value=3500, value=1500)
+                if st.form_submit_button("Add Player") and name:
+                    pid = t.next_player_id
+                    t.players[pid] = Player(pid, name, rating)
+                    t.next_player_id += 1
                     sync_to_cloud(t)
                     st.rerun()
-            else:
-                if c_del.button("Withdraw Player", type="primary"):
-                    sel_p.is_active = not sel_p.is_active
+                    
+            st.divider()
+            player_opts = {f"{p.name} ({p.rating}) - {'Active' if p.is_active else 'Withdrawn'}": p for p in t.players.values()}
+            sel_p_name = st.selectbox("Select Player to Edit/Withdraw", ["-- Select --"] + list(player_opts.keys()))
+            if sel_p_name != "-- Select --":
+                sel_p = player_opts[sel_p_name]
+                new_name = st.text_input("Edit Name", value=sel_p.name)
+                new_rating = st.number_input("Edit Rating", value=sel_p.rating)
+                c_ed, c_del = st.columns(2)
+                
+                if c_ed.button("Update Profile"):
+                    sel_p.name, sel_p.rating = new_name, new_rating
                     sync_to_cloud(t)
                     st.rerun()
+                    
+                if t.current_round == 1:
+                    if c_del.button("❌ Hard Delete", type="primary"):
+                        supabase.table("players").delete().eq("tournament", t.name).eq("id", sel_p.id).execute()
+                        del t.players[sel_p.id]
+                        sync_to_cloud(t)
+                        st.rerun()
+                else:
+                    if c_del.button("Withdraw Player", type="primary"):
+                        sel_p.is_active = not sel_p.is_active
+                        sync_to_cloud(t)
+                        st.rerun()
     with col2:
-        st.header(f"Live Standings (Round {t.current_round})")
-        sorted_players = get_sorted_players(t)
-        if sorted_players:
-            df = pd.DataFrame([{"Rank": i+1, "Name": p.name, "Score": p.score, "TB1": p.tb_mwb, "TB2": p.tb_h2h, "TB3": p.tb_buchholz, "TB4": p.tb_buchholz_cut, "Status": "Active" if p.is_active else "Withdrawn"} for i, p in enumerate(sorted_players)])
-            st.dataframe(df, hide_index=True, use_container_width=True)
+        st.header(f"Live Standings")
+        draw_standings(t)
 
 with tab2:
-    current_matches = [m for m in t.match_history if m['round'] == t.current_round]
-    active_count = len([p for p in t.players.values() if p.is_active])
-    
-    if active_count < 2: st.warning("Register at least 2 active players to start.")
-    elif not current_matches:
-        if st.button(f"🚀 Generate Pairings for Round {t.current_round}", type="primary"):
-            with st.spinner("Calculating FIDE pairings & Syncing..."):
-                generate_graph_pairings(t)
-                sync_to_cloud(t)
-            st.rerun()
+    if t.is_finished:
+        st.success(f"🏆 {t.name} has concluded! Final Standings are locked.")
+        st.info("To resume, use the Undo button in Settings.")
     else:
-        with st.form("round_results"):
-            results_dict = {}
-            for match in current_matches:
-                w_p = t.players[match['white_id']]
-                if match['board'] == 'BYE':
-                    st.info(f"🛌 **BYE (1 Point):** {w_p.name}")
-                else:
-                    b_p = t.players[match['black_id']]
-                    c_w, c_res, c_b = st.columns([3, 3, 3])
-                    c_w.write(f"⚪ **{w_p.name}** *(Score: {w_p.score})*")
-                    res = c_res.selectbox("Result", ["Pending", "1-0", "0-1", "0.5-0.5"], key=f"res_{match['board']}", label_visibility="collapsed")
-                    results_dict[match['board']] = res
-                    c_b.write(f"⚫ **{b_p.name}** *(Score: {b_p.score})*")
-                    st.divider()
+        current_matches = [m for m in t.match_history if m['round'] == t.current_round]
+        active_count = len([p for p in t.players.values() if p.is_active])
+        
+        if active_count < 2: 
+            st.warning("Register at least 2 active players to start.")
+        elif not current_matches:
+            # NO PENDING MATCHES (Round results were just submitted)
+            if t.current_round > 1:
+                st.subheader(f"✅ Results from Round {t.current_round - 1}")
+                prev_matches = [m for m in t.match_history if m['round'] == t.current_round - 1]
+                for m in prev_matches:
+                    w_p = t.players[m['white_id']]
+                    if m['board'] == 'BYE':
+                        st.write(f"**BYE:** {w_p.name}")
+                    else:
+                        b_p = t.players[m['black_id']]
+                        st.write(f"**Board {m['board']}:** ⚪ {w_p.name} vs ⚫ {b_p.name} **[{m['result']}]**")
+                st.divider()
 
-            if st.form_submit_button("Submit Results & Next Round", type="primary"):
-                if any(r == "Pending" for r in results_dict.values()): st.error("⚠️ Enter a result for every board.")
-                else:
-                    for match in current_matches:
-                        if match['board'] != 'BYE': match['result'] = results_dict[match['board']]
-                    t.current_round += 1
-                    with st.spinner("Saving results to Supabase..."):
-                        sync_to_cloud(t)
-                    st.rerun()
+            c1, c2 = st.columns(2)
+            if c1.button(f"🚀 Generate Pairings for Round {t.current_round}", type="primary"):
+                with st.spinner("Calculating FIDE pairings & Syncing..."):
+                    generate_graph_pairings(t)
+                    sync_to_cloud(t)
+                st.rerun()
+                
+            if c2.button("🏁 End Tournament", type="primary"):
+                t.is_finished = True
+                sync_to_cloud(t)
+                st.rerun()
+        else:
+            # PENDING MATCHES EXIST (Round is active)
+            with st.form("round_results"):
+                st.subheader(f"Round {t.current_round} Matches")
+                results_dict = {}
+                for match in current_matches:
+                    w_p = t.players[match['white_id']]
+                    if match['board'] == 'BYE':
+                        st.info(f"🛌 **BYE (1 Point):** {w_p.name}")
+                    else:
+                        b_p = t.players[match['black_id']]
+                        c_w, c_res, c_b = st.columns([3, 3, 3])
+                        c_w.write(f"⚪ **{w_p.name}** *(Score: {w_p.score})*")
+                        res = c_res.selectbox("Result", ["Pending", "1-0", "0-1", "0.5-0.5"], key=f"res_{match['board']}", label_visibility="collapsed")
+                        results_dict[match['board']] = res
+                        c_b.write(f"⚫ **{b_p.name}** *(Score: {b_p.score})*")
+                        st.divider()
+
+                if st.form_submit_button("Submit Results", type="primary"):
+                    if any(r == "Pending" for r in results_dict.values()): 
+                        st.error("⚠️ Enter a result for every board.")
+                    else:
+                        for match in current_matches:
+                            if match['board'] != 'BYE': match['result'] = results_dict[match['board']]
+                        t.current_round += 1
+                        with st.spinner("Saving results to Supabase..."):
+                            sync_to_cloud(t)
+                        st.rerun()
 
 with tab3:
+    st.header("⏪ Edit Matches")
     rounds = sorted(list(set([m['round'] for m in t.match_history])), reverse=True)
     for r in rounds:
-        with st.expander(f"Round {r}", expanded=(r == t.current_round)):
+        with st.expander(f"Round {r}"):
             r_matches = [m for m in t.match_history if m['round'] == r]
             for match in r_matches:
                 w_p = t.players[match['white_id']]
@@ -389,5 +491,21 @@ with tab3:
                     if new_res != match['result']:
                         match['result'] = new_res
                         sync_to_cloud(t)
-                        st.toast("Match updated in Supabase!")
+                        st.toast("Match updated!")
                         st.rerun()
+
+    st.divider()
+    st.header("⚙️ Tournament Settings")
+    if t.is_finished:
+        if st.button("⏪ Undo End Tournament"):
+            t.is_finished = False
+            sync_to_cloud(t)
+            st.rerun()
+            
+    st.write("⚠️ **Danger Zone**")
+    if st.button("🗑️ Delete Tournament & Clear Database"):
+        delete_tournament_from_cloud(t.name)
+        del st.session_state.tournaments[t.name]
+        st.session_state.active_t_name = None
+        st.success("Tournament Deleted.")
+        st.rerun()
