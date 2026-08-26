@@ -235,7 +235,6 @@ def generate_graph_pairings(t: Tournament):
             t.match_history.append({'round': t.current_round, 'board': board, 'white_id': white.id, 'black_id': black.id, 'result': 'Pending'})
             board += 1
 
-
 # ==========================================
 # 3. STREAMLIT UI
 # ==========================================
@@ -332,8 +331,25 @@ def draw_standings(t_obj):
         return
         
     df_data = []
+    prev_key = None
+    current_rank = 1
+    
     for i, p in enumerate(sorted_players):
-        row = {"Rank": i+1, "Name": p.name, "Score": p.score}
+        # Build comparison key (excludes Rating so players with different ratings tie)
+        key = [p.score]
+        for tb in t_obj.tiebreaks:
+            if tb == "Buchholz Cut 1": key.append(p.tb_buchholz_cut)
+            elif tb == "Buchholz Total": key.append(p.tb_buchholz)
+            elif tb == "Greater Number of Wins with Black": key.append(p.tb_mwb)
+            elif tb == "Direct Encounter (Head-to-Head)": key.append(p.tb_h2h)
+            elif tb == "Greater Number of Wins": key.append(p.tb_wins)
+            
+        # Update Rank offset if the key is different from the previous player
+        if key != prev_key:
+            current_rank = i + 1
+            prev_key = key
+            
+        row = {"Rank": current_rank, "Name": p.name, "Score": p.score}
         for tb in t_obj.tiebreaks:
             if tb == "Buchholz Cut 1": row["BC1"] = p.tb_buchholz_cut
             elif tb == "Buchholz Total": row["BT"] = p.tb_buchholz
@@ -363,7 +379,9 @@ if not st.session_state.is_arbiter:
         st.info("ℹ️ **Public View:** Showing live standings and pairings. (Auto-refreshes every 30s)")
         
     tab1, tab2 = st.tabs(["📊 Live Standings", "⚔️ Matches"])
-    with tab1: draw_standings(t)
+    with tab1: 
+        st.header(f"Live Standings ({t.current_round - 1} Rounds Completed)")
+        draw_standings(t)
     with tab2:
         rounds = sorted(list(set([m['round'] for m in t.match_history])), reverse=True)
         for r in rounds:
@@ -426,7 +444,7 @@ with tab1:
         st.info("Tournament is finished. Registration is locked.")
 
 with tab2:
-    st.header("Live Standings")
+    st.header(f"Live Standings ({t.current_round - 1} Rounds Completed)")
     draw_standings(t)
 
 with tab3:
