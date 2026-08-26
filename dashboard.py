@@ -67,7 +67,6 @@ def load_data_from_cloud():
 
 def sync_to_cloud(t):
     """Upserts the current tournament data directly to Supabase."""
-    # Sync Tournament Settings
     tb_str = ",".join(t.tiebreaks)
     supabase.table("tournaments").upsert({"name": t.name, "tiebreaks": tb_str, "is_finished": t.is_finished}).execute()
     
@@ -81,6 +80,12 @@ def delete_tournament_from_cloud(t_name):
     supabase.table("matches").delete().eq("tournament", t_name).execute()
     supabase.table("players").delete().eq("tournament", t_name).execute()
     supabase.table("tournaments").delete().eq("name", t_name).execute()
+
+def delete_round_pairings(t_name, round_num, t):
+    """Explicitly deletes a round from Supabase and removes it from memory."""
+    supabase.table("matches").delete().eq("tournament", t_name).eq("round", round_num).execute()
+    t.match_history = [m for m in t.match_history if m['round'] != round_num]
+    recalculate_standings(t)
 
 # ==========================================
 # 2. DATA MODELS & FIDE LOGIC
@@ -206,62 +211,25 @@ def generate_graph_pairings(t: Tournament):
     active_players = [p for p in t.players.values() if p.is_active]
     G = nx.Graph()
     for p in active_players: G.add_node(p.id)
-    
     DUMMY_BYE_ID = -999
     if len(active_players) % 2 != 0:
         G.add_node(DUMMY_BYE_ID)
         for p in active_players:
             if not p.has_had_bye:
-                # Base weight for a bye
                 bye_weight = 100000000 - (p.score * 100000) - p.rating
                 G.add_edge(p.id, DUMMY_BYE_ID, weight=bye_weight)
 
-    # Create edges between EVERY player, but heavily penalize duplicates
     for i in range(len(active_players)):
         for j in range(i + 1, len(active_players)):
             p1, p2 = active_players[i], active_players[j]
-            
-            # Base weight for a standard valid match
             weight = 10000000 - (abs(p1.score - p2.score) * 100000) - abs(p1.rating - p2.rating)
-            
-            # --- THE FALLBACK FIX ---
-            # If they have played before, apply a massive penalty.
-            # The algorithm will ONLY choose this if dropping players is the only other option.
             if p2.id in p1.opponents:
-                weight -= 500000000  
-                
-            # Color balancing penalties
+                weight -= 500000000  # Fallback: Allow duplicates only as a last resort
             p1_pref, p1_abs = p1.color_preference()
             p2_pref, p2_abs = p2.color_preference()
             if p1_abs and p2_abs and p1_pref == p2_pref: weight -= 50000
             elif p1_pref == p2_pref and p1_pref is not None: weight -= 10000
-            
             G.add_edge(p1.id, p2.id, weight=weight)
-
-    # maxcardinality=True ensures everyone gets paired
-    matching = nx.max_weight_matching(G, maxcardinality=True)
-    
-    board = 1
-    for u, v in matching:
-        if u == DUMMY_BYE_ID or v == DUMMY_BYE_ID:
-            bye_id = u if v == DUMMY_BYE_ID else v
-            t.match_history.append({'round': t.current_round, 'board': 'BYE', 'white_id': bye_id, 'black_id': None, 'result': 'BYE'})
-        else:
-            p1, p2 = t.players[u], t.players[v]
-            white, black = assign_colors(p1, p2)
-            t.match_history.append({'round': t.current_round, 'board': board, 'white_id': white.id, 'black_id': black.id, 'result': 'Pending'})
-            board += 1
-
-    for i in range(len(active_players)):
-        for j in range(i + 1, len(active_players)):
-            p1, p2 = active_players[i], active_players[j]
-            if p2.id not in p1.opponents:
-                weight = 10000000 - (abs(p1.score - p2.score) * 100000) - abs(p1.rating - p2.rating)
-                p1_pref, p1_abs = p1.color_preference()
-                p2_pref, p2_abs = p2.color_preference()
-                if p1_abs and p2_abs and p1_pref == p2_pref: weight -= 50000
-                elif p1_pref == p2_pref and p1_pref is not None: weight -= 10000
-                G.add_edge(p1.id, p2.id, weight=weight)
 
     matching = nx.max_weight_matching(G, maxcardinality=True)
     board = 1
@@ -331,7 +299,6 @@ with st.sidebar:
     tb3 = st.selectbox("Tiebreak 3", tb_opts, index=3)
     tb4 = st.selectbox("Tiebreak 4", tb_opts, index=0)
     
-    # Process tiebreaks (remove 'None' and duplicates)
     raw_tbs = [tb1, tb2, tb3, tb4]
     sel_tbs = []
     for tb in raw_tbs:
@@ -383,7 +350,6 @@ def draw_standings(t_obj):
     for i, p in enumerate(sorted_players):
         row = {"Rank": i+1, "Name": p.name, "Score": p.score}
         
-        # Add tiebreaks dynamically based on exact selection order
         for tb in t_obj.tiebreaks:
             if tb == "Buchholz Cut 1": row["BC1"] = p.tb_buchholz_cut
             elif tb == "Buchholz Total": row["BT"] = p.tb_buchholz
@@ -534,6 +500,13 @@ with tab2:
                             sync_to_cloud(t)
                         st.rerun()
 
+            st.divider()
+            st.write("⚠️ **Mistake in pairings?**")
+            if st.button("❌ Delete Current Round Pairings"):
+                delete_round_pairings(t.name, t.current_round, t)
+                st.toast(f"Round {t.current_round} deleted successfully!")
+                st.rerun()
+
 with tab3:
     st.header("⏪ Edit Matches")
     rounds = sorted(list(set([m['round'] for m in t.match_history])), reverse=True)
@@ -556,7 +529,6 @@ with tab3:
     st.header("⚙️ Tournament Settings")
     st.subheader("Update Tiebreak Priority")
     
-    # Helper to get the correct index based on current tournament settings
     def get_tb_index(tb_list, idx):
         if idx < len(tb_list) and tb_list[idx] in tb_opts:
             return tb_opts.index(tb_list[idx])
