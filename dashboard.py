@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import networkx as nx
+import streamlit.components.v1 as components
 from supabase import create_client, Client
 
 # ==========================================
@@ -19,10 +20,8 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 def load_data_from_cloud():
-    """Fetches all data from Supabase and rebuilds the memory states."""
     tournaments = {}
     
-    # 1. Load Tournaments
     res_t = supabase.table("tournaments").select("*").execute()
     for row in res_t.data:
         t = Tournament(row['name'])
@@ -30,7 +29,6 @@ def load_data_from_cloud():
         t.is_finished = row['is_finished']
         tournaments[t.name] = t
 
-    # 2. Load Players
     res_p = supabase.table("players").select("*").execute()
     for row in res_p.data:
         t_name = row['tournament']
@@ -41,7 +39,6 @@ def load_data_from_cloud():
             if p.id >= tournaments[t_name].next_player_id:
                 tournaments[t_name].next_player_id = p.id + 1
 
-    # 3. Load Matches
     res_m = supabase.table("matches").select("*").execute()
     for row in res_m.data:
         t_name = row['tournament']
@@ -56,7 +53,6 @@ def load_data_from_cloud():
             if row['round'] >= tournaments[t_name].current_round:
                 tournaments[t_name].current_round = row['round']
             
-    # Forward the round if previous round is fully resulted
     for t in tournaments.values():
         recalculate_standings(t)
         current_matches = [m for m in t.match_history if m['round'] == t.current_round]
@@ -66,7 +62,6 @@ def load_data_from_cloud():
     return tournaments
 
 def sync_to_cloud(t):
-    """Upserts the current tournament data directly to Supabase."""
     tb_str = ",".join(t.tiebreaks)
     supabase.table("tournaments").upsert({"name": t.name, "tiebreaks": tb_str, "is_finished": t.is_finished}).execute()
     
@@ -82,7 +77,6 @@ def delete_tournament_from_cloud(t_name):
     supabase.table("tournaments").delete().eq("name", t_name).execute()
 
 def delete_round_pairings(t_name, round_num, t):
-    """Explicitly deletes a round from Supabase and removes it from memory."""
     supabase.table("matches").delete().eq("tournament", t_name).eq("round", round_num).execute()
     t.match_history = [m for m in t.match_history if m['round'] != round_num]
     recalculate_standings(t)
@@ -160,12 +154,11 @@ def recalculate_standings(t: Tournament):
             elif match['result'] == '0-1': 
                 b_player.score += 1.0
                 b_player.tb_wins += 1
-                b_player.tb_mwb += 1 # Wins with Black
+                b_player.tb_mwb += 1 
             elif match['result'] == '0.5-0.5':
                 w_player.score += 0.5
                 b_player.score += 0.5
 
-    # Buchholz Math
     score_groups = {}
     for p in t.players.values():
         score_groups.setdefault(p.score, []).append(p)
@@ -174,7 +167,6 @@ def recalculate_standings(t: Tournament):
             p.tb_buchholz = sum(opp_scores)
             p.tb_buchholz_cut = p.tb_buchholz - min(opp_scores) if len(opp_scores) > 1 else p.tb_buchholz
 
-    # H2H Math
     for score, group in score_groups.items():
         if len(group) > 1:
             group_ids = {p.id for p in group}
@@ -224,7 +216,7 @@ def generate_graph_pairings(t: Tournament):
             p1, p2 = active_players[i], active_players[j]
             weight = 10000000 - (abs(p1.score - p2.score) * 100000) - abs(p1.rating - p2.rating)
             if p2.id in p1.opponents:
-                weight -= 500000000  # Fallback: Allow duplicates only as a last resort
+                weight -= 500000000  
             p1_pref, p1_abs = p1.color_preference()
             p2_pref, p2_abs = p2.color_preference()
             if p1_abs and p2_abs and p1_pref == p2_pref: weight -= 50000
@@ -251,7 +243,6 @@ st.set_page_config(page_title="Swiss Pairing Manager", layout="wide")
 
 st.session_state.setdefault("is_arbiter", False)
 
-# Fetch data on first load
 if "tournaments" not in st.session_state:
     with st.spinner("Fetching live data from Supabase..."):
         st.session_state.tournaments = load_data_from_cloud()
@@ -260,7 +251,6 @@ if "active_t_name" not in st.session_state:
     t_list = list(st.session_state.tournaments.keys())
     st.session_state.active_t_name = t_list[0] if t_list else None
 
-# Helper Variables
 tb_opts = [
     "None",
     "Buchholz Cut 1", 
@@ -272,7 +262,6 @@ tb_opts = [
 
 # --- SIDEBAR ---
 with st.sidebar:
-    # 1. Tournament Selector (Moved to Top)
     st.header("🏆 Live Tournaments")
     if st.button("🔄 Refresh Data"):
         st.session_state.tournaments = load_data_from_cloud()
@@ -289,7 +278,6 @@ with st.sidebar:
 
     st.divider()
 
-    # 2. Create Tournament (Moved to Middle)
     st.header("➕ Create Tournament")
     new_t_name = st.text_input("Tournament Name")
     
@@ -300,15 +288,17 @@ with st.sidebar:
     tb4 = st.selectbox("Tiebreak 4", tb_opts, index=0)
     
     raw_tbs = [tb1, tb2, tb3, tb4]
-    sel_tbs = []
-    for tb in raw_tbs:
-        if tb != "None" and tb not in sel_tbs:
-            sel_tbs.append(tb)
+    sel_tbs = [tb for tb in raw_tbs if tb != "None" and tb not in locals().get('sel_tbs', [])]
+    
+    # Quick dedup hack for simple list:
+    final_tbs = []
+    for x in sel_tbs:
+        if x not in final_tbs: final_tbs.append(x)
     
     if st.button("Create Tournament", use_container_width=True) and new_t_name:
         if new_t_name not in st.session_state.tournaments:
             new_t = Tournament(new_t_name)
-            new_t.tiebreaks = sel_tbs
+            new_t.tiebreaks = final_tbs
             st.session_state.tournaments[new_t_name] = new_t
             sync_to_cloud(new_t)
             st.session_state.active_t_name = new_t_name
@@ -318,7 +308,6 @@ with st.sidebar:
             
     st.divider()
 
-    # 3. Arbiter Login (Moved to Bottom)
     st.header("🔐 Arbiter System")
     if not st.session_state.is_arbiter:
         arbiter_pin = st.text_input("Enter PIN to manage tournaments", type="password")
@@ -331,15 +320,12 @@ with st.sidebar:
             st.session_state.is_arbiter = False
             st.rerun()
 
-# Halt rendering the main dashboard if no tournament exists yet
 if not st.session_state.active_t_name:
     st.warning("👈 Please create a tournament in the sidebar to get started.")
     st.stop()
 
-# Get Active Tournament
 t = st.session_state.tournaments[st.session_state.active_t_name]
 
-# Helper function to generate dynamic standings table
 def draw_standings(t_obj):
     sorted_players = get_sorted_players(t_obj)
     if not sorted_players:
@@ -349,7 +335,6 @@ def draw_standings(t_obj):
     df_data = []
     for i, p in enumerate(sorted_players):
         row = {"Rank": i+1, "Name": p.name, "Score": p.score}
-        
         for tb in t_obj.tiebreaks:
             if tb == "Buchholz Cut 1": row["BC1"] = p.tb_buchholz_cut
             elif tb == "Buchholz Total": row["BT"] = p.tb_buchholz
@@ -365,13 +350,19 @@ def draw_standings(t_obj):
 st.title(f"♟️ {t.name}")
 
 # ==========================================
-# PUBLIC VIEW
+# PUBLIC VIEW (Auto-Refreshing)
 # ==========================================
 if not st.session_state.is_arbiter:
+    # LIVE AUTO-REFRESH INJECTION
+    components.html(
+        "<script>setTimeout(function(){window.parent.location.reload();}, 30000);</script>",
+        height=0, width=0
+    )
+    
     if t.is_finished:
         st.success("🏁 **Tournament Completed**")
     else:
-        st.info("ℹ️ **Public View:** Showing live standings and pairings.")
+        st.info("ℹ️ **Public View:** Showing live standings and pairings. (Auto-refreshes every 30s)")
         
     tab1, tab2 = st.tabs(["📊 Live Standings", "⚔️ Matches"])
     with tab1: draw_standings(t)
@@ -398,9 +389,10 @@ with tab1:
     with col1:
         if not t.is_finished:
             with st.form("add_player", clear_on_submit=True):
+                st.write("**Add Player (Late Entries Allowed)**")
                 name = st.text_input("Player Name")
                 rating = st.number_input("Elo Rating", min_value=100, max_value=3500, value=1500)
-                if st.form_submit_button("Add Player") and name:
+                if st.form_submit_button("Register Player") and name:
                     pid = t.next_player_id
                     t.players[pid] = Player(pid, name, rating)
                     t.next_player_id += 1
@@ -439,7 +431,6 @@ with tab1:
 with tab2:
     if t.is_finished:
         st.success(f"🏆 {t.name} has concluded! Final Standings are locked.")
-        st.info("To resume, use the Undo button in Settings.")
     else:
         current_matches = [m for m in t.match_history if m['round'] == t.current_round]
         active_count = len([p for p in t.players.values() if p.is_active])
@@ -447,7 +438,6 @@ with tab2:
         if active_count < 2: 
             st.warning("Register at least 2 active players to start.")
         elif not current_matches:
-            # NO PENDING MATCHES (Round results were just submitted)
             if t.current_round > 1:
                 st.subheader(f"✅ Results from Round {t.current_round - 1}")
                 prev_matches = [m for m in t.match_history if m['round'] == t.current_round - 1]
@@ -472,7 +462,6 @@ with tab2:
                 sync_to_cloud(t)
                 st.rerun()
         else:
-            # PENDING MATCHES EXIST (Round is active)
             with st.form("round_results"):
                 st.subheader(f"Round {t.current_round} Matches")
                 results_dict = {}
@@ -498,6 +487,54 @@ with tab2:
                         t.current_round += 1
                         with st.spinner("Saving results to Supabase..."):
                             sync_to_cloud(t)
+                        st.rerun()
+            
+            # --- MANUAL OVERRIDES SECTION ---
+            with st.expander("🛠️ Manual Pairings & Color Overrides"):
+                st.write("Use this tool to swap colors or change matchups completely before submitting results.")
+                with st.form("override_form"):
+                    new_override_matches = []
+                    active_players = {p.id: p.name for p in t.players.values() if p.is_active}
+                    player_opts = list(active_players.keys())
+                    
+                    for match in current_matches:
+                        if match['board'] == 'BYE':
+                            w_p = t.players[match['white_id']]
+                            st.write(f"**BYE:** {w_p.name}")
+                            new_override_matches.append(match)
+                            continue
+                        
+                        col1, col2, col3 = st.columns([1, 4, 4])
+                        col1.write(f"**Brd {match['board']}**")
+                        
+                        w_id = col2.selectbox(
+                            "White", 
+                            options=player_opts, 
+                            format_func=lambda x: active_players[x], 
+                            index=player_opts.index(match['white_id']), 
+                            key=f"ow_{match['board']}"
+                        )
+                        b_id = col3.selectbox(
+                            "Black", 
+                            options=player_opts, 
+                            format_func=lambda x: active_players[x], 
+                            index=player_opts.index(match['black_id']), 
+                            key=f"ob_{match['board']}"
+                        )
+                        
+                        new_override_matches.append({
+                            'round': match['round'],
+                            'board': match['board'],
+                            'white_id': w_id,
+                            'black_id': b_id,
+                            'result': match['result']
+                        })
+                    
+                    if st.form_submit_button("Save Overrides", type="primary"):
+                        t.match_history = [m for m in t.match_history if m['round'] != t.current_round]
+                        t.match_history.extend(new_override_matches)
+                        sync_to_cloud(t)
+                        st.success("Pairings overridden successfully!")
                         st.rerun()
 
             st.divider()
