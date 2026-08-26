@@ -380,53 +380,56 @@ if not st.session_state.is_arbiter:
 # ==========================================
 # ARBITER VIEW
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["📊 Registration & Standings", "⚔️ Round Manager", "⏪ Settings & Edits"])
+tab1, tab2, tab3, tab4 = st.tabs(["📝 Registration", "📊 Standings", "⚔️ Round Manager", "⏪ Settings & Edits"])
 
 with tab1:
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        if not t.is_finished:
-            with st.form("add_player", clear_on_submit=True):
-                st.write("**Add Player (Late Entries Allowed)**")
-                name = st.text_input("Player Name")
-                rating = st.number_input("Elo Rating", min_value=100, max_value=3500, value=1500)
-                if st.form_submit_button("Register Player") and name:
-                    pid = t.next_player_id
-                    t.players[pid] = Player(pid, name, rating)
-                    t.next_player_id += 1
-                    sync_to_cloud(t)
-                    st.rerun()
-                    
-            st.divider()
-            player_opts = {f"{p.name} ({p.rating}) - {'Active' if p.is_active else 'Withdrawn'}": p for p in t.players.values()}
-            sel_p_name = st.selectbox("Select Player to Edit/Withdraw", ["-- Select --"] + list(player_opts.keys()))
-            if sel_p_name != "-- Select --":
-                sel_p = player_opts[sel_p_name]
-                new_name = st.text_input("Edit Name", value=sel_p.name)
-                new_rating = st.number_input("Edit Rating", value=sel_p.rating)
-                c_ed, c_del = st.columns(2)
+    st.header("Player Management")
+    if not t.is_finished:
+        with st.form("add_player", clear_on_submit=True):
+            st.write("**Add Player (Late Entries Allowed)**")
+            name = st.text_input("Player Name")
+            rating = st.number_input("Elo Rating", min_value=100, max_value=3500, value=1500)
+            if st.form_submit_button("Register Player") and name:
+                pid = t.next_player_id
+                t.players[pid] = Player(pid, name, rating)
+                t.next_player_id += 1
+                sync_to_cloud(t)
+                st.rerun()
                 
-                if c_ed.button("Update Profile"):
-                    sel_p.name, sel_p.rating = new_name, new_rating
+        st.divider()
+        st.write("**Edit or Withdraw Player**")
+        player_opts = {f"{p.name} ({p.rating}) - {'Active' if p.is_active else 'Withdrawn'}": p for p in t.players.values()}
+        sel_p_name = st.selectbox("Select Player to Edit/Withdraw", ["-- Select --"] + list(player_opts.keys()))
+        if sel_p_name != "-- Select --":
+            sel_p = player_opts[sel_p_name]
+            new_name = st.text_input("Edit Name", value=sel_p.name)
+            new_rating = st.number_input("Edit Rating", value=sel_p.rating)
+            c_ed, c_del = st.columns(2)
+            
+            if c_ed.button("Update Profile"):
+                sel_p.name, sel_p.rating = new_name, new_rating
+                sync_to_cloud(t)
+                st.rerun()
+                
+            if t.current_round == 1:
+                if c_del.button("❌ Hard Delete", type="primary"):
+                    supabase.table("players").delete().eq("tournament", t.name).eq("id", sel_p.id).execute()
+                    del t.players[sel_p.id]
                     sync_to_cloud(t)
                     st.rerun()
-                    
-                if t.current_round == 1:
-                    if c_del.button("❌ Hard Delete", type="primary"):
-                        supabase.table("players").delete().eq("tournament", t.name).eq("id", sel_p.id).execute()
-                        del t.players[sel_p.id]
-                        sync_to_cloud(t)
-                        st.rerun()
-                else:
-                    if c_del.button("Withdraw Player", type="primary"):
-                        sel_p.is_active = not sel_p.is_active
-                        sync_to_cloud(t)
-                        st.rerun()
-    with col2:
-        st.header(f"Live Standings")
-        draw_standings(t)
+            else:
+                if c_del.button("Withdraw Player", type="primary"):
+                    sel_p.is_active = not sel_p.is_active
+                    sync_to_cloud(t)
+                    st.rerun()
+    else:
+        st.info("Tournament is finished. Registration is locked.")
 
 with tab2:
+    st.header("Live Standings")
+    draw_standings(t)
+
+with tab3:
     if t.is_finished:
         st.success(f"🏆 {t.name} has concluded! Final Standings are locked.")
     else:
@@ -541,14 +544,13 @@ with tab2:
                 st.toast(f"Round {t.current_round} deleted successfully!")
                 st.rerun()
 
-with tab3:
+with tab4:
     st.header("⏪ Edit Matches")
     rounds = sorted(list(set([m['round'] for m in t.match_history])), reverse=True)
     for r in rounds:
         with st.expander(f"Round {r}"):
             r_matches = [m for m in t.match_history if m['round'] == r]
             
-            # --- THE FIX: Block the active round from clashing with memory ---
             if r == t.current_round and not t.is_finished:
                 st.info("ℹ️ This round is currently active. Please submit results in the **Round Manager** tab.")
                 for match in r_matches:
