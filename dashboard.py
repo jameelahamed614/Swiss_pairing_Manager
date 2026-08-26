@@ -266,7 +266,24 @@ tb_opts = [
 
 # --- SIDEBAR ---
 with st.sidebar:
-    # 1. Create Tournament (Moved Above Login)
+    # 1. Tournament Selector (Moved to Top)
+    st.header("🏆 Live Tournaments")
+    if st.button("🔄 Refresh Data"):
+        st.session_state.tournaments = load_data_from_cloud()
+        st.rerun()
+
+    t_names = list(st.session_state.tournaments.keys())
+    if t_names:
+        idx = t_names.index(st.session_state.active_t_name) if st.session_state.active_t_name in t_names else 0
+        selected_t = st.selectbox("Select Tournament", t_names, index=idx)
+        st.session_state.active_t_name = selected_t
+    else:
+        st.info("No tournaments available. Please create one below.")
+        st.session_state.active_t_name = None
+
+    st.divider()
+
+    # 2. Create Tournament (Moved to Middle)
     st.header("➕ Create Tournament")
     new_t_name = st.text_input("Tournament Name")
     
@@ -296,7 +313,7 @@ with st.sidebar:
             
     st.divider()
 
-    # 2. Arbiter Login (Hides input when logged in)
+    # 3. Arbiter Login (Moved to Bottom)
     st.header("🔐 Arbiter System")
     if not st.session_state.is_arbiter:
         arbiter_pin = st.text_input("Enter PIN to manage tournaments", type="password")
@@ -309,22 +326,10 @@ with st.sidebar:
             st.session_state.is_arbiter = False
             st.rerun()
 
-    st.divider()
-
-    # 3. Tournament Selector
-    st.header("🏆 Live Tournaments")
-    if st.button("🔄 Refresh Data"):
-        st.session_state.tournaments = load_data_from_cloud()
-        st.rerun()
-
-    t_names = list(st.session_state.tournaments.keys())
-    if t_names:
-        idx = t_names.index(st.session_state.active_t_name) if st.session_state.active_t_name in t_names else 0
-        selected_t = st.selectbox("Select Tournament", t_names, index=idx)
-        st.session_state.active_t_name = selected_t
-    else:
-        st.info("No tournaments available. Please create one.")
-        st.stop()
+# Halt rendering the main dashboard if no tournament exists yet
+if not st.session_state.active_t_name:
+    st.warning("👈 Please create a tournament in the sidebar to get started.")
+    st.stop()
 
 # Get Active Tournament
 t = st.session_state.tournaments[st.session_state.active_t_name]
