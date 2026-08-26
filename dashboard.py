@@ -254,20 +254,34 @@ if "active_t_name" not in st.session_state:
     t_list = list(st.session_state.tournaments.keys())
     st.session_state.active_t_name = t_list[0] if t_list else None
 
+# Helper Variables
+tb_opts = [
+    "None",
+    "Buchholz Cut 1", 
+    "Buchholz Total", 
+    "Greater Number of Wins with Black", 
+    "Direct Encounter (Head-to-Head)", 
+    "Greater Number of Wins"
+]
+
 # --- SIDEBAR ---
 with st.sidebar:
     # 1. Create Tournament (Moved Above Login)
     st.header("➕ Create Tournament")
     new_t_name = st.text_input("Tournament Name")
     
-    default_tb_opts = [
-        "Buchholz Cut 1", 
-        "Buchholz Total", 
-        "Greater Number of Wins with Black", 
-        "Direct Encounter (Head-to-Head)", 
-        "Greater Number of Wins"
-    ]
-    sel_tbs = st.multiselect("Select Tiebreak Order (Drag to reorder)", default_tb_opts, default=default_tb_opts)
+    st.write("**Select Tiebreak Priority:**")
+    tb1 = st.selectbox("Tiebreak 1", tb_opts, index=1)
+    tb2 = st.selectbox("Tiebreak 2", tb_opts, index=2)
+    tb3 = st.selectbox("Tiebreak 3", tb_opts, index=3)
+    tb4 = st.selectbox("Tiebreak 4", tb_opts, index=0)
+    
+    # Process tiebreaks (remove 'None' and duplicates)
+    raw_tbs = [tb1, tb2, tb3, tb4]
+    sel_tbs = []
+    for tb in raw_tbs:
+        if tb != "None" and tb not in sel_tbs:
+            sel_tbs.append(tb)
     
     if st.button("Create Tournament", use_container_width=True) and new_t_name:
         if new_t_name not in st.session_state.tournaments:
@@ -325,7 +339,8 @@ def draw_standings(t_obj):
     df_data = []
     for i, p in enumerate(sorted_players):
         row = {"Rank": i+1, "Name": p.name, "Score": p.score}
-        # Add tiebreaks dynamically based on selection order
+        
+        # Add tiebreaks dynamically based on exact selection order
         for tb in t_obj.tiebreaks:
             if tb == "Buchholz Cut 1": row["BC1"] = p.tb_buchholz_cut
             elif tb == "Buchholz Total": row["BT"] = p.tb_buchholz
@@ -496,6 +511,30 @@ with tab3:
 
     st.divider()
     st.header("⚙️ Tournament Settings")
+    st.subheader("Update Tiebreak Priority")
+    
+    # Helper to get the correct index based on current tournament settings
+    def get_tb_index(tb_list, idx):
+        if idx < len(tb_list) and tb_list[idx] in tb_opts:
+            return tb_opts.index(tb_list[idx])
+        return 0
+        
+    upd_tb1 = st.selectbox("Update Tiebreak 1", tb_opts, index=get_tb_index(t.tiebreaks, 0))
+    upd_tb2 = st.selectbox("Update Tiebreak 2", tb_opts, index=get_tb_index(t.tiebreaks, 1))
+    upd_tb3 = st.selectbox("Update Tiebreak 3", tb_opts, index=get_tb_index(t.tiebreaks, 2))
+    upd_tb4 = st.selectbox("Update Tiebreak 4", tb_opts, index=get_tb_index(t.tiebreaks, 3))
+    
+    if st.button("Save Tiebreaks"):
+        new_raw = [upd_tb1, upd_tb2, upd_tb3, upd_tb4]
+        t.tiebreaks = []
+        for x in new_raw:
+            if x != "None" and x not in t.tiebreaks:
+                t.tiebreaks.append(x)
+        sync_to_cloud(t)
+        st.success("Tiebreaks updated successfully!")
+        st.rerun()
+    
+    st.divider()
     if t.is_finished:
         if st.button("⏪ Undo End Tournament"):
             t.is_finished = False
